@@ -27,8 +27,38 @@ uv sync
 ### 3. Understand the staging helper
 Because the pipeline reads **all** files in `normal/`, you must copy only the
 files for each batch into a staging directory before running each flow.
-The commands below use the path `tmp_test/` as the staging root so the
-original `tmp/user/` data is never modified.
+The commands below use `tmp_test/` as the staging root so the original
+`tmp/user/` data is never modified.
+
+```bash
+# Define a staging function (bash)
+stage() {
+  USER_ID=$1; WALLET=$2; shift 2
+  DEST="tmp_test/$USER_ID/$WALLET/normal"
+  rm -rf "$DEST" && mkdir -p "$DEST"
+  for BATCH in "$@"; do
+    cp "tmp/user/$USER_ID/$WALLET/normal/combined_tx_batch_${BATCH}.parquet" "$DEST/"
+  done
+  echo "staged  $WALLET  batches=$*"
+}
+```
+
+---
+
+## CLI reference
+
+```
+# Triggered when a user connects a wallet (single wallet, first-time):
+python main.py first-time <user_id> <wallet_address> [--tmp-root TMP]
+
+# Daily job — processes all connected wallets in one pass by default:
+python main.py daily <user_id> [--tmp-root TMP]
+
+# Daily job — override to process only specific wallets:
+python main.py daily <user_id> --wallets W1 W2 W3 [--tmp-root TMP]
+```
+
+Logs are written to both stdout and `logs/metrics_pipeline.log`.
 
 ---
 
@@ -43,26 +73,6 @@ Users
 └── 69e29d7ebb75c92bdac43fe1  (User 2)
     ├── 0x0d53ab1ede05039f6b91b753ddca767cf9a2fad9  (Wallet D)
     └── 0x73d2a51ba95f1e05fb271b3f4140617c2bd9c691  (Wallet E)
-```
-
----
-
-## Staging helper (copy-paste once)
-
-Run this Python snippet in your shell to define a `stage` helper for the
-session, or just do the `cp` commands manually.
-
-```bash
-# Define a staging function (bash)
-stage() {
-  USER_ID=$1; WALLET=$2; shift 2
-  DEST="tmp_test/$USER_ID/$WALLET/normal"
-  rm -rf "$DEST" && mkdir -p "$DEST"
-  for BATCH in "$@"; do
-    cp "tmp/user/$USER_ID/$WALLET/normal/combined_tx_batch_${BATCH}.parquet" "$DEST/"
-  done
-  echo "staged  $WALLET  batches=$*"
-}
 ```
 
 ---
@@ -90,7 +100,7 @@ uv run python main.py first-time \
   --tmp-root tmp_test
 ```
 
-**Expected logger output:**
+**Expected log output:**
 ```
 PREVIOUS RUN  no existing document found — this is a first-time run
 FIRST-TIME BATCH  wallet=0x02d650...
@@ -108,10 +118,11 @@ FINAL RESULT
 ```bash
 uv run python -c "
 from dotenv import load_dotenv; load_dotenv()
-import json
 from metrics_pipeline.mongo import fetch_user_doc
 doc = fetch_user_doc('69d693b1ba9f20d582dae331')
-print(json.dumps({k: v for k, v in doc.items() if k != 'wallets'}, indent=2))
+print('wallets:', len(doc['wallets']))
+print('active_days:', doc['active_days'])
+print('tx_count:', doc['total_transactions_count'])
 for w in doc['wallets']:
     print('  wallet:', w['wallet_address'])
     for c in w['chains']:
@@ -123,18 +134,17 @@ for w in doc['wallets']:
 ```bash
 stage 69d693b1ba9f20d582dae331 0x02d650eea6458794b57492aca061fdbd26d97767 4 5
 
-uv run python main.py daily \
-  69d693b1ba9f20d582dae331 \
-  0x02d650eea6458794b57492aca061fdbd26d97767 \
-  --tmp-root tmp_test
+uv run python main.py daily 69d693b1ba9f20d582dae331 --tmp-root tmp_test
 ```
 
-**Expected logger output:**
+`daily` reads all connected wallets from MongoDB automatically — no `--wallets` needed.
+
+**Expected log output:**
 ```
-PREVIOUS RUN  (shows Batch A metrics from MongoDB)
+PREVIOUS RUN  (shows Batch A metrics)
 DELTA BATCH   wallet=0x02d650...
     wallet-level active_days in this batch: <M>
-      chain=ethereum  ...  (only new transactions)
+      chain=ethereum  ...
       chain=polygon   ...
 FINAL RESULT  (Batch A + Batch B merged)
   user=69d693...  active_days=<N+M>  tx_count=<combined>
@@ -143,7 +153,7 @@ FINAL RESULT  (Batch A + Batch B merged)
 ### Step 5: Verify updated document
 Re-run the verify command from Step 3 and confirm:
 - `active_days` increased by the Batch B delta
-- `total_transactions_count` is the sum of both batches
+- `total_transactions_count` = Batch A + Batch B
 - `total_gas_burned` increased per chain
 - `_first_tx_date` unchanged
 
@@ -162,7 +172,7 @@ print('deleted', r.deleted_count, 'document(s)')
 rm -rf tmp_test/69d693b1ba9f20d582dae331
 ```
 
-### Step 2: first_time_flow — Wallet A (Batch A)
+### Step 2: first_time_flow — Wallet A
 ```bash
 stage 69d693b1ba9f20d582dae331 0x02d650eea6458794b57492aca061fdbd26d97767 1 2 3
 
@@ -171,9 +181,9 @@ uv run python main.py first-time \
   0x02d650eea6458794b57492aca061fdbd26d97767 \
   --tmp-root tmp_test
 ```
-→ Document is created with 1 wallet.
+→ Document created with 1 wallet.
 
-### Step 3: first_time_flow — Wallet B (Batch A)
+### Step 3: first_time_flow — Wallet B
 ```bash
 stage 69d693b1ba9f20d582dae331 0x353479020cd3d3327af1589ad73d067c75f2dece 1 2 3
 
@@ -182,10 +192,9 @@ uv run python main.py first-time \
   0x353479020cd3d3327af1589ad73d067c75f2dece \
   --tmp-root tmp_test
 ```
-→ **Logger should show `PREVIOUS RUN` with Wallet A's data** (not "no existing document").
-→ Document now has 2 wallets.
+→ `PREVIOUS RUN` log shows Wallet A's data. Document now has 2 wallets.
 
-### Step 4: first_time_flow — Wallet C (Batch A)
+### Step 4: first_time_flow — Wallet C
 ```bash
 stage 69d693b1ba9f20d582dae331 0x9f56506dea67eb73f1f2887fbcceca223ee71a42 1 2 3
 
@@ -194,10 +203,9 @@ uv run python main.py first-time \
   0x9f56506dea67eb73f1f2887fbcceca223ee71a42 \
   --tmp-root tmp_test
 ```
-→ Logger shows `PREVIOUS RUN` with Wallet A + B data.
-→ Document now has 3 wallets.
+→ `PREVIOUS RUN` shows Wallets A + B. Document now has 3 wallets.
 
-### Step 5: Verify all 3 wallets are present
+### Step 5: Verify all 3 wallets present
 ```bash
 uv run python -c "
 from dotenv import load_dotenv; load_dotenv()
@@ -210,22 +218,18 @@ for w in doc['wallets']:
 ```
 Expected: `wallet count: 3`
 
-### Step 6: daily_flow for each wallet (Batch B)
+### Step 6: daily_flow — all 3 wallets in one pass (Batch B)
 ```bash
-# Wallet A
+# Stage Batch B for all wallets first
 stage 69d693b1ba9f20d582dae331 0x02d650eea6458794b57492aca061fdbd26d97767 4 5
-uv run python main.py daily 69d693b1ba9f20d582dae331 0x02d650eea6458794b57492aca061fdbd26d97767 --tmp-root tmp_test
-
-# Wallet B
 stage 69d693b1ba9f20d582dae331 0x353479020cd3d3327af1589ad73d067c75f2dece 4 5
-uv run python main.py daily 69d693b1ba9f20d582dae331 0x353479020cd3d3327af1589ad73d067c75f2dece --tmp-root tmp_test
-
-# Wallet C
 stage 69d693b1ba9f20d582dae331 0x9f56506dea67eb73f1f2887fbcceca223ee71a42 4 5
-uv run python main.py daily 69d693b1ba9f20d582dae331 0x9f56506dea67eb73f1f2887fbcceca223ee71a42 --tmp-root tmp_test
+
+# Single daily command processes all 3 wallets
+uv run python main.py daily 69d693b1ba9f20d582dae331 --tmp-root tmp_test
 ```
 
-After each `daily` call, the PREVIOUS RUN log should always show **all 3 wallets** (the ones not being updated are preserved unchanged).
+**Expected log output:** one `PREVIOUS RUN` → three `DELTA BATCH` blocks → one `FINAL RESULT`.
 
 ---
 
@@ -246,26 +250,21 @@ rm -rf tmp_test/
 
 ### Step 2: first_time_flow — User 1, all 3 wallets (Batch A)
 ```bash
-# Wallet A
 stage 69d693b1ba9f20d582dae331 0x02d650eea6458794b57492aca061fdbd26d97767 1 2 3
 uv run python main.py first-time 69d693b1ba9f20d582dae331 0x02d650eea6458794b57492aca061fdbd26d97767 --tmp-root tmp_test
 
-# Wallet B
 stage 69d693b1ba9f20d582dae331 0x353479020cd3d3327af1589ad73d067c75f2dece 1 2 3
 uv run python main.py first-time 69d693b1ba9f20d582dae331 0x353479020cd3d3327af1589ad73d067c75f2dece --tmp-root tmp_test
 
-# Wallet C
 stage 69d693b1ba9f20d582dae331 0x9f56506dea67eb73f1f2887fbcceca223ee71a42 1 2 3
 uv run python main.py first-time 69d693b1ba9f20d582dae331 0x9f56506dea67eb73f1f2887fbcceca223ee71a42 --tmp-root tmp_test
 ```
 
 ### Step 3: first_time_flow — User 2, both wallets (Batch A)
 ```bash
-# Wallet D
 stage 69e29d7ebb75c92bdac43fe1 0x0d53ab1ede05039f6b91b753ddca767cf9a2fad9 1 2 3
 uv run python main.py first-time 69e29d7ebb75c92bdac43fe1 0x0d53ab1ede05039f6b91b753ddca767cf9a2fad9 --tmp-root tmp_test
 
-# Wallet E
 stage 69e29d7ebb75c92bdac43fe1 0x73d2a51ba95f1e05fb271b3f4140617c2bd9c691 1 2 3
 uv run python main.py first-time 69e29d7ebb75c92bdac43fe1 0x73d2a51ba95f1e05fb271b3f4140617c2bd9c691 --tmp-root tmp_test
 ```
@@ -288,37 +287,32 @@ Expected:
 [OK] user=69e29d7ebb75c92bdac43fe1  wallets=2/2  tx_count=<N>
 ```
 
-### Step 5: daily_flow — User 1, all 3 wallets (Batch B)
+### Step 5: daily_flow — User 1 (Batch B, all 3 wallets in one pass)
 ```bash
 stage 69d693b1ba9f20d582dae331 0x02d650eea6458794b57492aca061fdbd26d97767 4 5
-uv run python main.py daily 69d693b1ba9f20d582dae331 0x02d650eea6458794b57492aca061fdbd26d97767 --tmp-root tmp_test
-
 stage 69d693b1ba9f20d582dae331 0x353479020cd3d3327af1589ad73d067c75f2dece 4 5
-uv run python main.py daily 69d693b1ba9f20d582dae331 0x353479020cd3d3327af1589ad73d067c75f2dece --tmp-root tmp_test
-
 stage 69d693b1ba9f20d582dae331 0x9f56506dea67eb73f1f2887fbcceca223ee71a42 4 5
-uv run python main.py daily 69d693b1ba9f20d582dae331 0x9f56506dea67eb73f1f2887fbcceca223ee71a42 --tmp-root tmp_test
+
+uv run python main.py daily 69d693b1ba9f20d582dae331 --tmp-root tmp_test
 ```
 
-### Step 6: daily_flow — User 2, both wallets (Batch B)
+### Step 6: daily_flow — User 2 (Batch B, both wallets in one pass)
 ```bash
 stage 69e29d7ebb75c92bdac43fe1 0x0d53ab1ede05039f6b91b753ddca767cf9a2fad9 4 5
-uv run python main.py daily 69e29d7ebb75c92bdac43fe1 0x0d53ab1ede05039f6b91b753ddca767cf9a2fad9 --tmp-root tmp_test
-
 stage 69e29d7ebb75c92bdac43fe1 0x73d2a51ba95f1e05fb271b3f4140617c2bd9c691 4 5
-uv run python main.py daily 69e29d7ebb75c92bdac43fe1 0x73d2a51ba95f1e05fb271b3f4140617c2bd9c691 --tmp-root tmp_test
+
+uv run python main.py daily 69e29d7ebb75c92bdac43fe1 --tmp-root tmp_test
 ```
 
 ### Step 7: Final verification — both users fully updated
 ```bash
 uv run python -c "
 from dotenv import load_dotenv; load_dotenv()
-import json
 from metrics_pipeline.mongo import fetch_user_doc
 
 for uid in ['69d693b1ba9f20d582dae331', '69e29d7ebb75c92bdac43fe1']:
     doc = fetch_user_doc(uid)
-    print(f\"user={uid}\")
+    print(f'user={uid}')
     print(f\"  wallets={len(doc['wallets'])}  active_days={doc['active_days']}  tx_count={doc['total_transactions_count']}  first_tx={doc['_first_tx_date']}\")
     for w in doc['wallets']:
         print(f\"  wallet={w['wallet_address']}\")
@@ -331,8 +325,6 @@ for uid in ['69d693b1ba9f20d582dae331', '69e29d7ebb75c92bdac43fe1']:
 ---
 
 ## Cleanup
-
-Remove all test documents and the staging directory:
 
 ```bash
 uv run python -c "
@@ -350,11 +342,11 @@ rm -rf tmp_test/
 
 ## What to look for in the logs
 
-| Log section | first_time_flow | daily_flow |
-|-------------|-----------------|------------|
-| `PREVIOUS RUN` | "no existing document" for the very first wallet of a user; existing data for subsequent wallets | Always shows the current MongoDB state before merge |
-| `FIRST-TIME BATCH` / `DELTA BATCH` | Per-chain metrics computed from Batch A only | Per-chain metrics computed from Batch B only |
-| `FINAL RESULT` | Full merged document written to MongoDB | Full merged document with A+B values |
+| Log section | `first_time_flow` | `daily_flow` |
+|-------------|-------------------|--------------|
+| `PREVIOUS RUN` | "no existing document" for very first wallet; shows existing data for subsequent wallets | Shows full current MongoDB state before merge |
+| `FIRST-TIME BATCH` / `DELTA BATCH` | One block per wallet — metrics from Batch A only | One block per wallet — metrics from Batch B only |
+| `FINAL RESULT` | Appears once after all wallets are processed | Appears once after all wallets are processed |
 
 ### Key assertions after each daily_flow
 
@@ -364,3 +356,4 @@ rm -rf tmp_test/
 - `_first_tx_date` unchanged (always the earliest transaction seen)
 - `wallet_age_days` recalculated as `(today - _first_tx_date).days`
 - All wallets present in the document (none dropped)
+- Logs written to `logs/metrics_pipeline.log`

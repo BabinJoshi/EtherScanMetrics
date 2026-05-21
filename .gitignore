@@ -13,3 +13,6 @@ wheels/
 .venv
 tmp_test/
 
+# Logs
+logs/
+

@@ -2,21 +2,41 @@ from __future__ import annotations
 
 import logging
 import sys
+import uuid
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .calculator import ChainBatchMetrics
 
 # ── module-level logger setup ─────────────────────────────────────────────────
+# Each import (i.e. each pipeline run) gets its own log file:
+#   logs/YYYY-MM-DD/run_HHMMSS_<8-char-id>.log
 
-_handler = logging.StreamHandler(sys.stdout)
-_handler.setFormatter(
-    logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+_run_start = datetime.now()
+_run_id = f"{_run_start.strftime('%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+_log_day_dir = Path(__file__).parent.parent / "logs" / _run_start.strftime("%Y-%m-%d")
+_log_day_dir.mkdir(parents=True, exist_ok=True)
+
+_fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setFormatter(_fmt)
+
+_file_handler = logging.FileHandler(
+    _log_day_dir / f"run_{_run_id}.log",
+    encoding="utf-8",
 )
+_file_handler.setFormatter(_fmt)
 
 logger = logging.getLogger("metrics_pipeline")
 logger.setLevel(logging.INFO)
-logger.addHandler(_handler)
+logger.addHandler(_console_handler)
+logger.addHandler(_file_handler)
 logger.propagate = False
+
+logger.info("RUN START  id=%s", _run_id)
 
 
 # ── formatting helpers ────────────────────────────────────────────────────────
@@ -62,7 +82,7 @@ def _user_line(u: dict[str, Any], indent: str = "  ") -> str:
 
 # ── public log functions ──────────────────────────────────────────────────────
 
-def log_previous(existing_doc: dict[str, Any] | None, wallet_address: str) -> None:
+def log_previous(existing_doc: dict[str, Any] | None) -> None:
     if existing_doc is None:
         logger.info("PREVIOUS RUN  no existing document found — this is a first-time run")
         return

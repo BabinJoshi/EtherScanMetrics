@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,6 @@ from .mongo import fetch_user_doc, replace_user_doc
 
 
 def _build_chain_lookup(wallet_doc: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    """Return {chain_name: chain_dict} from an existing wallet sub-document."""
     if wallet_doc is None:
         return {}
     return {c["chain"]: c for c in wallet_doc.get("chains", [])}
@@ -28,14 +28,14 @@ def _process_wallet(
     tmp_root: Path,
     existing_user_doc: dict[str, Any] | None,
     is_first_time: bool,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any], int, frozenset[date]]:
     """Calculate + merge metrics for one wallet.
 
-    Returns (merged_wallet_doc, delta_active_days_for_this_wallet).
+    Returns (merged_wallet_doc, delta_active_days, active_date_set).
     """
     parquet_dir = tmp_root / user_id / wallet_address
 
-    chain_batch_list, wallet_delta_active_days = calculate_batch_metrics(
+    chain_batch_list, wallet_delta_active_days, active_date_set = calculate_batch_metrics(
         parquet_dir, wallet_address
     )
 
@@ -50,7 +50,6 @@ def _process_wallet(
         for cb in chain_batch_list
     ]
 
-    # Preserve chains that exist in MongoDB but had no new data in this batch
     new_chain_names = {cb.chain for cb in chain_batch_list}
     for chain_name, chain_doc in chain_lookup.items():
         if chain_name not in new_chain_names:
@@ -59,60 +58,21 @@ def _process_wallet(
     merged_wallet = merge_wallet(
         existing_wallet, wallet_address, merged_chains, wallet_delta_active_days
     )
-    return merged_wallet, wallet_delta_active_days
+    return merged_wallet, wallet_delta_active_days, active_date_set
 
 
-# ── public entry points ───────────────────────────────────────────────────────
-
-def first_time_flow(user_id: str, wallet_address: str, tmp_root: Path = Path("tmp")) -> None:
-    """Full calculation for a wallet connecting for the first time.
-
-    Fetches the existing user doc so other already-connected wallets on the
-    same account are preserved in the upserted document.
-    """
-    existing_user_doc = fetch_user_doc(user_id)
-    log_previous(existing_user_doc, wallet_address)
-
-    merged_wallet, wallet_delta = _process_wallet(
-        user_id, wallet_address, tmp_root, existing_user_doc, is_first_time=True
-    )
-
+def _assemble_and_save(
+    existing_user_doc: dict[str, Any] | None,
+    user_id: str,
+    updated_wallets: list[dict[str, Any]],
+    updated_addresses: set[str],
+    user_delta: int,
+) -> None:
     wallet_lookup = _build_wallet_lookup(existing_user_doc)
-    all_merged_wallets = [merged_wallet]
+    all_merged_wallets = list(updated_wallets)
     for addr, wallet_doc in wallet_lookup.items():
-        if addr != wallet_address:
+        if addr not in updated_addresses:
             all_merged_wallets.append(wallet_doc)
-
-    user_doc = merge_user(
-        existing_doc=existing_user_doc,
-        user_id=user_id,
-        merged_wallets=all_merged_wallets,
-        delta_active_days=wallet_delta,
-    )
-    replace_user_doc(user_doc)
-    log_final(user_doc)
-
-
-def daily_flow(user_id: str, wallet_address: str, tmp_root: Path = Path("tmp")) -> None:
-    """Incremental update: merge new parquet batch with existing MongoDB state."""
-    existing_user_doc = fetch_user_doc(user_id)
-    log_previous(existing_user_doc, wallet_address)
-
-    merged_wallet, wallet_delta = _process_wallet(
-        user_id, wallet_address, tmp_root, existing_user_doc, is_first_time=False
-    )
-
-    # Preserve wallets that exist in MongoDB but aren't being updated now
-    wallet_lookup = _build_wallet_lookup(existing_user_doc)
-    all_merged_wallets = [merged_wallet]
-    for addr, wallet_doc in wallet_lookup.items():
-        if addr != wallet_address:
-            all_merged_wallets.append(wallet_doc)
-
-    # User-level active_days delta: distinct dates across this wallet's new batch
-    # (For multi-wallet daily runs the caller should compute cross-wallet delta;
-    #  single-wallet daily runs can use wallet_delta directly.)
-    user_delta = wallet_delta
 
     user_doc = merge_user(
         existing_doc=existing_user_doc,
@@ -122,3 +82,56 @@ def daily_flow(user_id: str, wallet_address: str, tmp_root: Path = Path("tmp")) 
     )
     replace_user_doc(user_doc)
     log_final(user_doc)
+
+
+# ── public entry points ───────────────────────────────────────────────────────
+
+def first_time_flow(user_id: str, wallet_address: str, tmp_root: Path = Path("tmp")) -> None:
+    """First-time calculation for a single wallet."""
+    existing_user_doc = fetch_user_doc(user_id)
+    log_previous(existing_user_doc)
+
+    merged_wallet, _, active_date_set = _process_wallet(
+        user_id, wallet_address, tmp_root, existing_user_doc, is_first_time=True
+    )
+    _assemble_and_save(
+        existing_user_doc, user_id,
+        [merged_wallet], {wallet_address},
+        len(active_date_set),
+    )
+
+
+def daily_flow(
+    user_id: str,
+    wallet_addresses: list[str] | None = None,
+    tmp_root: Path = Path("tmp"),
+) -> None:
+    """Daily incremental update for a user's wallets in one pass.
+
+    If wallet_addresses is omitted, all wallets stored in the existing
+    MongoDB document are processed. Fetches once, writes once.
+    """
+    existing_user_doc = fetch_user_doc(user_id)
+    log_previous(existing_user_doc)
+
+    wallets_to_run = wallet_addresses or list(_build_wallet_lookup(existing_user_doc).keys())
+    if not wallets_to_run:
+        from .logger import logger
+        logger.warning("daily_flow: no wallets found for user=%s — nothing to do", user_id)
+        return
+
+    all_active_dates: set[date] = set()
+    updated_wallets: list[dict[str, Any]] = []
+
+    for wallet_address in wallets_to_run:
+        merged_wallet, _, active_date_set = _process_wallet(
+            user_id, wallet_address, tmp_root, existing_user_doc, is_first_time=False
+        )
+        updated_wallets.append(merged_wallet)
+        all_active_dates |= active_date_set
+
+    _assemble_and_save(
+        existing_user_doc, user_id,
+        updated_wallets, set(wallets_to_run),
+        len(all_active_dates),
+    )

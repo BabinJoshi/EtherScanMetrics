@@ -18,14 +18,14 @@ class ChainBatchMetrics:
 
 def calculate_batch_metrics(
     parquet_dir: Path, wallet_address: str
-) -> tuple[list[ChainBatchMetrics], int, int]:
+) -> tuple[list[ChainBatchMetrics], int, frozenset[date]]:
     """Calculate per-chain metrics from parquet files in parquet_dir/normal/*.
 
     Returns:
-        (chain_metrics, wallet_active_days, user_active_days)
+        (chain_metrics, wallet_active_days, active_date_set)
         wallet_active_days = distinct dates across all chains in this batch
-        user_active_days   = same as wallet for single-wallet call; caller
-                             aggregates across wallets for user level
+        active_date_set    = frozenset of those dates; caller unions across
+                             wallets to compute the correct user-level delta
     """
     normal_dir = parquet_dir / "normal"
     pattern = str(normal_dir / "*.parquet")
@@ -83,8 +83,9 @@ def calculate_batch_metrics(
         )
 
     # ── wallet-level active days (distinct dates across all chains) ──────────
-    wallet_active_days: int = (
-        lf.select(pl.col("tx_date").n_unique()).collect().item()
+    active_date_set: frozenset[date] = frozenset(
+        lf.select(pl.col("tx_date")).collect()["tx_date"].to_list()
     )
+    wallet_active_days = len(active_date_set)
 
-    return chain_metrics, wallet_active_days
+    return chain_metrics, wallet_active_days, active_date_set
