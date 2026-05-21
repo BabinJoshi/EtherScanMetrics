@@ -1,0 +1,11 @@
+[project]
+name = "etherscanmetricstest"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "polars>=1.0.0",
+    "pymongo>=4.0.0",
+    "python-dotenv>=1.0.0",
+]
