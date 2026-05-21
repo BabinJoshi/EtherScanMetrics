@@ -11,5 +11,5 @@ wheels/
 
 # Virtual environments
 .venv
-tmp/
+tmp_test/
 
