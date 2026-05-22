@@ -376,11 +376,14 @@ uv run python main.py daily-all --tmp-root tmp_test
 ```
 daily_all_flow: found 2 users  batch_size=1000
 daily_all_flow: batch [0..1]  users=2  scanning…
-DELTA BATCH  wallet=0x...   (5 blocks, one per wallet)
-FINAL RESULT (2 blocks, one per user)
+PREVIOUS RUN  (per user — "no existing document" on a clean run)
+DELTA BATCH   (per wallet — 5 blocks total across both users)
+FINAL RESULT  (per user — 2 blocks total)
 daily_all_flow: batch [0..1] wrote 2 documents
 daily_all_flow: complete  wrote=2  failed_batches=0
 ```
+
+For each user the order is **PREVIOUS RUN → DELTA BATCH (one per wallet) → FINAL RESULT**, so you can read top-to-bottom and verify that the final per-chain values equal previous + delta.
 
 Note that even on a first-ever run, the `daily-all` log header reads
 `DELTA BATCH`, not `FIRST-TIME BATCH`. The `is_first_time` flag is hard-coded
@@ -491,7 +494,7 @@ rm -rf tmp_test/
 
 | Log section | `first_time_flow` | `daily_flow` | `daily_all_flow` |
 |-------------|-------------------|--------------|------------------|
-| `PREVIOUS RUN` | "no existing document" for very first wallet; shows existing data for subsequent wallets | Shows full current MongoDB state before merge | Not emitted (this flow skips `log_previous`) |
+| `PREVIOUS RUN` | "no existing document" for very first wallet; shows existing data for subsequent wallets | Shows full current MongoDB state before merge | One block per user in each batch — shows that user's existing Mongo doc before merge (or "no existing document" for first-time users) |
 | `daily_all_flow: found N users  batch_size=…` | — | — | Once at start |
 | `daily_all_flow: batch [start..end] scanning…` | — | — | Once per batch (before the Polars scan) |
 | `FIRST-TIME BATCH` / `DELTA BATCH` | One block per wallet — metrics from Batch A only | One block per wallet — metrics from Batch B only | One `DELTA BATCH` per wallet (every wallet flagged `is_first_time=False`) |

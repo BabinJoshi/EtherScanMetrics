@@ -206,6 +206,7 @@ def daily_all_flow(tmp_root: Path = Path("tmp"), batch_size: int = 1000) -> None
                 continue
 
             existing_user_doc = existing_docs.get(user_id)
+            log_previous(existing_user_doc)
             updated_wallets: list[dict[str, Any]] = []
 
             for wallet_address, wallet_batch in user_batch.wallets.items():

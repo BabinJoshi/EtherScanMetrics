@@ -108,6 +108,7 @@ EtherScanMetricsTest/
             │           → {user_id: UserBatchAggregate{wallets, delta_active_days}}
             │
             ├── for each user in the batch:
+            │      ├── log_previous() — existing Mongo doc for the user
             │      ├── merger.py: _merge_one_wallet() per wallet → merge_user()
             │      ├── log_delta()  per wallet
             │      └── log_final()  per user
@@ -202,6 +203,7 @@ The scalable production entry point. Processes every user with staged data via b
 4. For each batch:
    - Calls `calculate_user_batch_metrics(tmp_root, batch_user_ids)` — **one** `pl.scan_parquet` over every parquet under the batch's user dirs, executed via Polars' streaming engine. Returns `{user_id: UserBatchAggregate}`.
    - For each user in the batch:
+     - Looks up the existing Mongo doc from the pre-fetched dict and logs it via `log_previous()` so the run output reads top-to-bottom as **previous state → delta → final state** per user.
      - For each wallet: calls `_merge_one_wallet()` (re-using the same merge logic as the per-wallet flow), with `log_delta()`.
      - Calls `_assemble_user_doc()` to produce the final merged document; logs it via `log_final()`.
    - Calls `bulk_replace_user_docs(batch_docs)` — **one `bulk_write`** per batch with `ordered=False`.
