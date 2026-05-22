@@ -40,11 +40,28 @@ The system is designed so that each run only ever sees the **new transactions** 
 ## Project Structure
 
 ```
-EtherScanMetricsTest/
+EtherScanMetrics/
 ├── main.py                       CLI entry point
 ├── pyproject.toml
 ├── .env                          MongoDB credentials
 ├── TESTING.md                    Manual test scenarios
+├── tmp/
+│   ├── first_fetch/              Data for first-time wallet processing
+│   │   └── <user_id>/
+│   │       └── <wallet_address>/
+│   │           ├── erc20/
+│   │           ├── erc1155/
+│   │           ├── erc721/
+│   │           └── normal/
+│   │               └── *.parquet
+│   └── daily_fetch/              Data for daily incremental updates
+│       └── <user_id>/
+│           └── <wallet_address>/
+│               ├── erc20/
+│               ├── erc1155/
+│               ├── erc721/
+│               └── normal/
+│                   └── *.parquet
 └── metrics_pipeline/
     ├── __init__.py
     ├── pipeline.py               Orchestration — first_time_flow, daily_flow, daily_all_flow
@@ -63,6 +80,8 @@ EtherScanMetricsTest/
 ```
  CLI (main.py)
       │  user_id, wallet_address(es), tmp_root
+      │  ├─ first-time: uses tmp/first_fetch/
+      │  └─ daily: uses tmp/daily_fetch/
       ▼
  pipeline.py  ─── fetch_user_doc() ──▶  MongoDB (existing state)
       │                                       │
@@ -71,7 +90,7 @@ EtherScanMetricsTest/
       │  for each wallet:
       ▼
  calculator.py
-      │  reads:  tmp/<user_id>/<wallet>/normal/*.parquet
+      │  reads:  tmp/(first_fetch|daily_fetch)/<user_id>/<wallet>/normal/*.parquet
       │  outputs: list[ChainBatchMetrics], wallet_active_days, active_date_set
       ▼
  merger.py
@@ -90,9 +109,10 @@ EtherScanMetricsTest/
 ```
  CLI (main.py)
       │  tmp_root, batch_size
+      │  └─ always uses tmp/daily_fetch/
       ▼
  pipeline.py
-      ├── scans tmp_root/ for user directories (sorted)
+      ├── scans tmp/daily_fetch/ for user directories (sorted)
       │
       ├── fetch_all_user_docs() ──▶  MongoDB   (ONE query for all users)
       │         │
@@ -102,7 +122,7 @@ EtherScanMetricsTest/
       │
       └── for each batch:
             │
-            ├── calculate_user_batch_metrics(tmp_root, batch_user_ids)
+            ├── calculate_user_batch_metrics(tmp/daily_fetch/, batch_user_ids)
             │      └── ONE pl.scan_parquet over every parquet in the batch
             │           (streaming engine, Polars handles intra-batch parallelism)
             │           → {user_id: UserBatchAggregate{wallets, delta_active_days}}
@@ -135,7 +155,11 @@ The CLI provides three subcommands.
 python main.py first-time <user_id> <wallet_address> [--tmp-root TMP]
 ```
 
-Called when a user connects a wallet for the first time. Processes all Parquet files currently present in `tmp/<user_id>/<wallet_address>/normal/` and saves the result to MongoDB.
+Called when a user connects a wallet for the first time. Processes all Parquet files currently present in `tmp/first_fetch/<user_id>/<wallet_address>/normal/` and saves the result to MongoDB.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--tmp-root` | `tmp` | Root directory (auto-routes to `tmp/first_fetch/`) |
 
 ### `daily`
 
@@ -143,7 +167,11 @@ Called when a user connects a wallet for the first time. Processes all Parquet f
 python main.py daily <user_id> [--wallets W1 W2 ...] [--tmp-root TMP]
 ```
 
-Single-user targeted run. Useful for reruns, debugging, or backfilling one user. If `--wallets` is omitted, all wallet addresses stored in the existing MongoDB document are processed. Fetches once from MongoDB and writes once.
+Single-user targeted run. Useful for reruns, debugging, or backfilling one user. Reads from `tmp/daily_fetch/`. If `--wallets` is omitted, all wallet addresses stored in the existing MongoDB document are processed. Fetches once from MongoDB and writes once.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--tmp-root` | `tmp` | Root directory (auto-routes to `tmp/daily_fetch/`) |
 
 ### `daily-all`
 
@@ -151,11 +179,11 @@ Single-user targeted run. Useful for reruns, debugging, or backfilling one user.
 python main.py daily-all [--tmp-root TMP] [--batch-size N]
 ```
 
-The standard production cron entry point. Discovers every user directory under `tmp_root`, fetches all existing MongoDB documents in a single query, then processes users in chunks of `batch_size`. Each chunk runs **one** `pl.scan_parquet` over every parquet under the chunk's user dirs and issues **one** `bulk_write` to MongoDB. A failed batch is logged and skipped — remaining batches still run.
+The standard production cron entry point. Discovers every user directory under `tmp/daily_fetch/`, fetches all existing MongoDB documents in a single query, then processes users in chunks of `batch_size`. Each chunk runs **one** `pl.scan_parquet` over every parquet under the chunk's user dirs and issues **one** `bulk_write` to MongoDB. A failed batch is logged and skipped — remaining batches still run.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--tmp-root` | `tmp` | Root directory containing staged user/wallet Parquet files |
+| `--tmp-root` | `tmp` | Root directory (auto-routes to `tmp/daily_fetch/`) |
 | `--batch-size` | `1000` | Users processed per Polars scan + Mongo `bulk_write`. Memory scales with batch size, not total user count. |
 
 All three commands delegate immediately to `pipeline.py`.
@@ -332,7 +360,7 @@ Reads Parquet files and produces structured metrics. This is the only module tha
 
 #### `calculate_user_batch_metrics(tmp_root, user_ids) → dict[str, UserBatchAggregate]`
 
-The batched, multi-user equivalent of `calculate_batch_metrics`. Used by `daily_all_flow`. Reads every parquet under `tmp_root/<user_id>/<wallet>/normal/` for the given `user_ids` in a single Polars scan.
+The batched, multi-user equivalent of `calculate_batch_metrics`. Used by `daily_all_flow`. Reads every parquet under `tmp/daily_fetch/<user_id>/<wallet>/normal/` (passed via `tmp_root`) for the given `user_ids` in a single Polars scan.
 
 **Input:** A list of `user_ids` and the shared `tmp_root`. The function expands these into one glob pattern per user (`tmp_root/<uid>/*/normal/*.parquet`) and passes the list to `pl.scan_parquet`.
 
@@ -508,11 +536,28 @@ Manages the MongoDB connection and all database I/O.
 
 ## Input Parquet Files
 
-**Directory layout:**
+**Directory layout (first-time):**
 ```
-tmp/
+tmp/first_fetch/
 └── <user_id>/
     └── <wallet_address>/
+        ├── erc20/
+        ├── erc1155/
+        ├── erc721/
+        └── normal/
+            ├── combined_tx_batch_1.parquet
+            ├── combined_tx_batch_2.parquet
+            └── ...
+```
+
+**Directory layout (daily):**
+```
+tmp/daily_fetch/
+└── <user_id>/
+    └── <wallet_address>/
+        ├── erc20/
+        ├── erc1155/
+        ├── erc721/
         └── normal/
             ├── combined_tx_batch_1.parquet
             ├── combined_tx_batch_2.parquet
@@ -576,7 +621,11 @@ MONGODB_DB=your_database_name
 
 `MONGODB_URI` is required. `MONGODB_DB` defaults to `"nucleus"` if absent.
 
-**`--tmp-root` flag:** Overrides the default `tmp/` directory for Parquet files. Useful in testing (e.g., `--tmp-root tmp_test`).
+**`--tmp-root` flag:** Overrides the default `tmp/` directory for Parquet files. The pipeline automatically routes:
+- `first-time` commands → `<tmp-root>/first_fetch/`
+- `daily` and `daily-all` commands → `<tmp-root>/daily_fetch/`
+
+Useful in testing (e.g., `--tmp-root tmp_test`).
 
 ---
 

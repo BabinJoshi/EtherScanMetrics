@@ -24,16 +24,16 @@ def main() -> None:
     p = sub.add_parser("first-time")
     p.add_argument("user_id")
     p.add_argument("wallet_address")
-    p.add_argument("--tmp-root", default="tmp")
+    p.add_argument("--tmp-root", default="tmp", help="Tmp root directory (default: tmp)")
 
     p = sub.add_parser("daily")
     p.add_argument("user_id")
     p.add_argument("--wallets", nargs="+", default=None, metavar="WALLET",
                    help="Wallets to process (default: all wallets in MongoDB)")
-    p.add_argument("--tmp-root", default="tmp")
+    p.add_argument("--tmp-root", default="tmp", help="Tmp root directory (default: tmp)")
 
     p = sub.add_parser("daily-all")
-    p.add_argument("--tmp-root", default="tmp")
+    p.add_argument("--tmp-root", default="tmp", help="Tmp root directory (default: tmp)")
     p.add_argument("--batch-size", type=int, default=1000, metavar="N",
                    help="Users per Polars scan batch (default: 1000)")
 
@@ -41,14 +41,17 @@ def main() -> None:
     tmp_root = Path(args.tmp_root)
 
     if args.command == "first-time":
-        first_time_flow(args.user_id, args.wallet_address, tmp_root)
+        first_fetch_root = tmp_root / "first_fetch"
+        first_time_flow(args.user_id, args.wallet_address, first_fetch_root)
         print(f"first-time flow complete: user={args.user_id} wallet={args.wallet_address}")
     elif args.command == "daily":
-        daily_flow(args.user_id, args.wallets, tmp_root)
+        daily_fetch_root = tmp_root / "daily_fetch"
+        daily_flow(args.user_id, args.wallets, daily_fetch_root)
         wallets_label = args.wallets or "all"
         print(f"daily flow complete: user={args.user_id} wallets={wallets_label}")
     elif args.command == "daily-all":
-        daily_all_flow(tmp_root, batch_size=args.batch_size)
+        daily_fetch_root = tmp_root / "daily_fetch"
+        daily_all_flow(daily_fetch_root, batch_size=args.batch_size)
         print(f"daily-all flow complete: tmp_root={tmp_root} batch_size={args.batch_size}")
 
 
