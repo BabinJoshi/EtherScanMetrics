@@ -3,15 +3,18 @@
 Triggered on wallet connect (single wallet):
     python main.py first-time <user_id> <wallet_address> [--tmp-root TMP]
 
-Daily job — processes all connected wallets by default, or a subset:
+Daily job — one user (targeted rerun):
     python main.py daily <user_id>                           [--tmp-root TMP]
     python main.py daily <user_id> --wallets W1 W2 ...      [--tmp-root TMP]
+
+Daily job — all users via batched Polars scans:
+    python main.py daily-all                                 [--tmp-root TMP] [--batch-size N]
 """
 
 import argparse
 from pathlib import Path
 
-from metrics_pipeline.pipeline import daily_flow, first_time_flow
+from metrics_pipeline.pipeline import daily_all_flow, daily_flow, first_time_flow
 
 
 def main() -> None:
@@ -29,6 +32,11 @@ def main() -> None:
                    help="Wallets to process (default: all wallets in MongoDB)")
     p.add_argument("--tmp-root", default="tmp")
 
+    p = sub.add_parser("daily-all")
+    p.add_argument("--tmp-root", default="tmp")
+    p.add_argument("--batch-size", type=int, default=1000, metavar="N",
+                   help="Users per Polars scan batch (default: 1000)")
+
     args = parser.parse_args()
     tmp_root = Path(args.tmp_root)
 
@@ -39,6 +47,9 @@ def main() -> None:
         daily_flow(args.user_id, args.wallets, tmp_root)
         wallets_label = args.wallets or "all"
         print(f"daily flow complete: user={args.user_id} wallets={wallets_label}")
+    elif args.command == "daily-all":
+        daily_all_flow(tmp_root, batch_size=args.batch_size)
+        print(f"daily-all flow complete: tmp_root={tmp_root} batch_size={args.batch_size}")
 
 
 if __name__ == "__main__":
